@@ -4,6 +4,24 @@ MCP 服务器管理、工具调试与文档生成。
 
 技术栈：FastAPI + React/Vite + SQLite。
 
+## 界面预览
+
+### 工具调试
+
+![工具调试](docs/screenshots/01-overview.png)
+
+### 资源
+
+![资源](docs/screenshots/02-resources.png)
+
+### 提示词
+
+![提示词](docs/screenshots/03-prompts.png)
+
+### 文档与导出
+
+![文档](docs/screenshots/04-docs.png)
+
 ## 本地开发
 
 ### 后端
@@ -77,4 +95,5 @@ STDIO 服务器配置示例：command=`python`，args=`["demo_server/stdio_main.
 - `backend/` — API 与 MCP 客户端
 - `frontend/` — 管理界面
 - `demo_server/` — 联调 MCP
+- `docs/screenshots/` — README 界面截图
 - `data/` — SQLite
