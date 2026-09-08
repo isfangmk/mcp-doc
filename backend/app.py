@@ -31,7 +31,7 @@ logger = logging.getLogger("mcp_doc")
 
 storage.init_db()
 
-web_app = FastAPI(title="MCP Doc", description="MCP 工具与文档服务")
+web_app = FastAPI(title="MCP Doc", description="连接 MCP 服务，调试 Tools / Resources / Prompts，沉淀文档")
 web_app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

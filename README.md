@@ -1,6 +1,6 @@
 # MCP Doc
 
-MCP 服务器管理、工具调试与文档生成。
+连接 MCP 服务，调试 Tools / Resources / Prompts，沉淀文档。
 
 技术栈：FastAPI + React/Vite + SQLite。
 
