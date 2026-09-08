@@ -42,20 +42,38 @@ function ResourceBlock({
       return;
     }
     setLoading(true);
+    const started = performance.now();
     try {
       const res = await readResource(serverId, uri);
       const text = res.text
         ? formatJsonString(res.text)
         : JSON.stringify(res.contents || [], null, 2);
+      const latencyMs =
+        typeof res.latency_ms === 'number'
+          ? res.latency_ms
+          : Math.round(performance.now() - started);
       setLastResults((prev) => ({
         ...prev,
-        [key]: { uri, text, mimeType: res.mimeType || '', contents: res.contents, error: false },
+        [key]: {
+          uri,
+          text,
+          mimeType: res.mimeType || '',
+          contents: res.contents,
+          error: false,
+          latency_ms: latencyMs,
+        },
       }));
       setSaveDisabled(false);
     } catch (err) {
       setLastResults((prev) => ({
         ...prev,
-        [key]: { uri, text: err.message, mimeType: '', error: true },
+        [key]: {
+          uri,
+          text: err.message,
+          mimeType: '',
+          error: true,
+          latency_ms: Math.round(performance.now() - started),
+        },
       }));
       setSaveDisabled(true);
     } finally {
@@ -157,6 +175,9 @@ function ResourceBlock({
             <div className="result-toolbar">
               <span className="result-label">
                 {last.mimeType ? `内容 · ${last.mimeType}` : '内容'}
+                {last.latency_ms != null && (
+                  <span className="result-latency">耗时 {last.latency_ms} ms</span>
+                )}
               </span>
             </div>
             <pre className="result-box result-area">{last.text}</pre>

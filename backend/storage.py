@@ -106,6 +106,24 @@ def init_db() -> None:
                 PRIMARY KEY (server_id, prompt_name),
                 FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
             );
+
+            -- 追加式调用历史：工具 / 资源 / 提示词每次调用一条
+            CREATE TABLE IF NOT EXISTS call_history (
+                id TEXT PRIMARY KEY,
+                server_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                arguments_json TEXT NOT NULL DEFAULT '{}',
+                result_text TEXT NOT NULL DEFAULT '',
+                is_error INTEGER NOT NULL DEFAULT 0,
+                error_message TEXT NOT NULL DEFAULT '',
+                latency_ms INTEGER,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_call_history_server_created
+                ON call_history(server_id, created_at DESC);
             """
         )
         # 存量库升级：补齐 HTTP / STDIO 双传输字段
@@ -667,7 +685,117 @@ def clear_server_saved(server_id: str) -> int:
             "resource_results",
             "prompt_results",
             "prompt_last_runs",
+            "call_history",
         ):
             cur = conn.execute(f"DELETE FROM {table} WHERE server_id = ?", (server_id,))
             total += cur.rowcount
         return total
+
+
+def append_call_history(
+    server_id: str,
+    kind: str,
+    name: str,
+    arguments: dict[str, Any] | None,
+    result_text: str,
+    is_error: bool,
+    error_message: str = "",
+    latency_ms: int | None = None,
+) -> dict[str, Any]:
+    """追加一条调用历史（工具 / 资源 / 提示词）。"""
+    entry_id = str(uuid.uuid4())
+    now = _now_iso()
+    args_json = json.dumps(arguments or {}, ensure_ascii=False)
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO call_history "
+            "(id, server_id, kind, name, arguments_json, result_text, is_error, "
+            "error_message, latency_ms, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                entry_id,
+                server_id,
+                kind,
+                name,
+                args_json,
+                result_text or "",
+                1 if is_error else 0,
+                error_message or "",
+                latency_ms,
+                now,
+            ),
+        )
+    return {
+        "id": entry_id,
+        "server_id": server_id,
+        "kind": kind,
+        "name": name,
+        "arguments": arguments or {},
+        "result": result_text or "",
+        "is_error": bool(is_error),
+        "error_message": error_message or "",
+        "latency_ms": latency_ms,
+        "created_at": now,
+    }
+
+
+def list_call_history(server_id: str, limit: int = 200) -> list[dict[str, Any]]:
+    """按时间倒序列出调用历史。"""
+    limit = max(1, min(int(limit or 200), 500))
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, server_id, kind, name, arguments_json, result_text, "
+            "is_error, error_message, latency_ms, created_at "
+            "FROM call_history WHERE server_id = ? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (server_id, limit),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        out.append(
+            {
+                "id": row["id"],
+                "server_id": row["server_id"],
+                "kind": row["kind"],
+                "name": row["name"],
+                "arguments": json.loads(row["arguments_json"] or "{}"),
+                "result": row["result_text"] or "",
+                "is_error": bool(row["is_error"]),
+                "error_message": row["error_message"] or "",
+                "latency_ms": row["latency_ms"],
+                "created_at": row["created_at"],
+            }
+        )
+    return out
+
+
+def clear_call_history(server_id: str) -> int:
+    """清空某服务器的全部调用历史。"""
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM call_history WHERE server_id = ?", (server_id,))
+        return cur.rowcount
+
+
+def get_call_history_entry(server_id: str, entry_id: str) -> dict[str, Any] | None:
+    """按 id 取单条历史，不存在则 None。"""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT id, server_id, kind, name, arguments_json, result_text, "
+            "is_error, error_message, latency_ms, created_at "
+            "FROM call_history WHERE server_id = ? AND id = ?",
+            (server_id, entry_id),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "server_id": row["server_id"],
+        "kind": row["kind"],
+        "name": row["name"],
+        "arguments": json.loads(row["arguments_json"] or "{}"),
+        "result": row["result_text"] or "",
+        "is_error": bool(row["is_error"]),
+        "error_message": row["error_message"] or "",
+        "latency_ms": row["latency_ms"],
+        "created_at": row["created_at"],
+    }

@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MCP Doc · 调用历史（示意）</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: #161b22;
+      --panel-hover: #21262d;
+      --border: #30363d;
+      --border-subtle: #21262d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --accent-dim: rgba(88, 166, 255, 0.15);
+      --success: #3fb950;
+      --success-dim: rgba(63, 185, 80, 0.12);
+      --danger: #f85149;
+      --danger-dim: rgba(248, 81, 73, 0.12);
+      --warn: #d29922;
+      --warn-dim: rgba(210, 153, 34, 0.12);
+      --radius: 10px;
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+    .page {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 28px 24px 48px;
+    }
+    .kicker {
+      font-size: 0.75rem;
+      color: var(--muted);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin: 0 0 8px;
+    }
+    h1 {
+      margin: 0 0 6px;
+      font-size: 1.5rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+    .note {
+      margin: 0 0 22px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px 18px 20px;
+    }
+    .tabs {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .tab {
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--muted);
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 0.875rem;
+      cursor: default;
+    }
+    .tab.active {
+      background: var(--accent-dim);
+      color: var(--accent);
+      border-color: rgba(88, 166, 255, 0.35);
+    }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    .search {
+      flex: 1;
+      min-width: 180px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 0.875rem;
+    }
+    .search::placeholder { color: var(--muted); }
+    .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+    .chip {
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--muted);
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 0.75rem;
+      cursor: pointer;
+    }
+    .chip.active {
+      border-color: rgba(88, 166, 255, 0.45);
+      color: var(--accent);
+      background: var(--accent-dim);
+    }
+    .meta-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 12px;
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+    .btn {
+      border: 1px solid var(--border);
+      background: var(--panel-hover);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 6px 10px;
+      font-size: 0.8rem;
+      cursor: pointer;
+    }
+    .btn.primary {
+      background: var(--accent-dim);
+      border-color: rgba(88, 166, 255, 0.4);
+      color: var(--accent);
+    }
+
+    /* —— 时间线 —— */
+    .timeline {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      max-height: 640px;
+      overflow: auto;
+      padding-right: 4px;
+    }
+    .timeline::before {
+      content: "";
+      position: absolute;
+      left: 15px;
+      top: 8px;
+      bottom: 8px;
+      width: 2px;
+      background: linear-gradient(180deg, var(--border), transparent);
+    }
+    .entry {
+      position: relative;
+      padding: 0 0 14px 40px;
+    }
+    .entry:last-child { padding-bottom: 0; }
+    .dot {
+      position: absolute;
+      left: 8px;
+      top: 18px;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      border: 2px solid var(--border);
+      background: var(--panel);
+      z-index: 1;
+    }
+    .entry.ok .dot {
+      border-color: var(--success);
+      box-shadow: 0 0 0 3px var(--success-dim);
+    }
+    .entry.err .dot {
+      border-color: var(--danger);
+      box-shadow: 0 0 0 3px var(--danger-dim);
+    }
+    .card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      transition: border-color 0.15s ease, background 0.15s ease;
+    }
+    .card:hover { border-color: #484f58; }
+    .card.open {
+      border-color: rgba(88, 166, 255, 0.4);
+      background: #0f141b;
+    }
+    .card-head {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 10px 12px;
+      align-items: start;
+      padding: 12px 14px;
+      cursor: pointer;
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      border: 0;
+      color: inherit;
+      font: inherit;
+    }
+    .kind {
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 3px 7px;
+      border-radius: 6px;
+      margin-top: 2px;
+    }
+    .kind.tool { color: var(--accent); background: var(--accent-dim); }
+    .kind.resource { color: #a371f7; background: rgba(163, 113, 247, 0.12); }
+    .kind.prompt { color: var(--warn); background: var(--warn-dim); }
+    .title-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 8px;
+    }
+    .name {
+      font-family: var(--mono);
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+    .status {
+      font-size: 0.72rem;
+      padding: 2px 6px;
+      border-radius: 999px;
+    }
+    .status.ok { color: var(--success); background: var(--success-dim); }
+    .status.err { color: var(--danger); background: var(--danger-dim); }
+    .sub {
+      margin-top: 4px;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+    .stats {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 4px;
+      font-size: 0.75rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .stats .latency {
+      font-family: var(--mono);
+      color: var(--text);
+      font-weight: 600;
+    }
+    .card-body {
+      display: none;
+      border-top: 1px solid var(--border-subtle);
+      padding: 12px 14px 14px;
+    }
+    .card.open .card-body { display: block; }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    @media (max-width: 720px) {
+      .grid-2 { grid-template-columns: 1fr; }
+      .card-head { grid-template-columns: auto 1fr; }
+      .stats { grid-column: 1 / -1; flex-direction: row; justify-content: space-between; width: 100%; }
+    }
+    .block-label {
+      font-size: 0.72rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin: 0 0 6px;
+    }
+    pre {
+      margin: 0;
+      padding: 10px 12px;
+      background: #0a0e14;
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      overflow: auto;
+      max-height: 180px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    pre.err {
+      border-color: rgba(248, 81, 73, 0.35);
+      color: #ffb4af;
+    }
+    .actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+    .empty {
+      text-align: center;
+      color: var(--muted);
+      padding: 48px 16px;
+      font-size: 0.9rem;
+    }
+    .legend {
+      margin-top: 18px;
+      font-size: 0.8rem;
+      color: var(--muted);
+      border-top: 1px dashed var(--border);
+      padding-top: 14px;
+    }
+    .legend code {
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      background: var(--bg);
+      padding: 1px 5px;
+      border-radius: 4px;
+      border: 1px solid var(--border-subtle);
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <p class="kicker">UI 示意 · 不接后端</p>
+    <h1>调用历史 · 追加时间线</h1>
+    <p class="note">
+      作为右侧第 5 个 Tab「历史」的候选布局：每次 tools / resources / prompts 调用追加一条，
+      可展开看参数与结果，支持按类型筛选与重放。请确认交互与信息密度。
+    </p>
+
+    <div class="panel">
+      <div class="tabs" aria-hidden="true">
+        <span class="tab">工具</span>
+        <span class="tab">资源</span>
+        <span class="tab">提示词</span>
+        <span class="tab">文档</span>
+        <span class="tab active">历史</span>
+      </div>
+
+      <div class="toolbar">
+        <input class="search" type="search" placeholder="按名称 / 内容搜索…" id="q" />
+        <div class="chips" id="filters">
+          <button type="button" class="chip active" data-kind="all">全部</button>
+          <button type="button" class="chip" data-kind="tool">工具</button>
+          <button type="button" class="chip" data-kind="resource">资源</button>
+          <button type="button" class="chip" data-kind="prompt">提示词</button>
+          <button type="button" class="chip" data-kind="error">仅错误</button>
+        </div>
+      </div>
+
+      <div class="meta-row">
+        <span id="count">共 6 条 · 服务器 demo-auth</span>
+        <div>
+          <button type="button" class="btn" id="collapseAll">全部折叠</button>
+          <button type="button" class="btn primary" id="clearDemo">清空（示意）</button>
+        </div>
+      </div>
+
+      <div class="timeline" id="timeline"></div>
+      <div class="empty" id="empty" hidden>暂无调用记录。在工具 / 资源 / 提示词中执行后会出现在这里。</div>
+
+      <p class="legend">
+        示意要点：竖向时间线 + 状态圆点；卡片头展示类型 / 名称 / 成败 / 耗时 / 时间；
+        展开后左右分栏看 <code>arguments</code> 与 <code>result</code>；操作含「重放」「保存到文档」「复制」。
+        数据为假数据，点击「重放」仅 toast。
+      </p>
+    </div>
+  </div>
+
+  <script>
+    const ENTRIES = [
+      {
+        id: 1,
+        kind: "tool",
+        name: "echo",
+        ok: true,
+        latency_ms: 42,
+        at: "12:18:03",
+        summary: "message = hello mcp-doc",
+        arguments: { message: "hello mcp-doc" },
+        result: { content: [{ type: "text", text: "hello mcp-doc" }] },
+      },
+      {
+        id: 2,
+        kind: "tool",
+        name: "add",
+        ok: true,
+        latency_ms: 38,
+        at: "12:17:41",
+        summary: "a=3, b=5 → 8",
+        arguments: { a: 3, b: 5 },
+        result: { content: [{ type: "text", text: "8" }] },
+      },
+      {
+        id: 3,
+        kind: "prompt",
+        name: "summarize",
+        ok: true,
+        latency_ms: 61,
+        at: "12:16:55",
+        summary: "topic=MCP Doc, style=简洁",
+        arguments: { topic: "MCP Doc", style: "简洁" },
+        result: {
+          messages: [
+            { role: "user", content: { type: "text", text: "请用简洁风格摘要主题：MCP Doc" } },
+          ],
+        },
+      },
+      {
+        id: 4,
+        kind: "resource",
+        name: "demo://about",
+        ok: true,
+        latency_ms: 29,
+        at: "12:15:12",
+        summary: "text/plain · 静态说明",
+        arguments: { uri: "demo://about" },
+        result: { contents: [{ uri: "demo://about", mimeType: "text/plain", text: "Demo MCP for mcp-doc…" }] },
+      },
+      {
+        id: 5,
+        kind: "tool",
+        name: "set_priority",
+        ok: false,
+        latency_ms: 910,
+        at: "12:14:02",
+        summary: "Connection timed out",
+        arguments: { task_id: "T-1024", priority: "high", notify: true },
+        result: null,
+        error: "Error: timed out after 900ms connecting to http://127.0.0.1:8766/mcp",
+      },
+      {
+        id: 6,
+        kind: "resource",
+        name: "demo://items/{item_id}",
+        ok: true,
+        latency_ms: 35,
+        at: "12:12:48",
+        summary: "item_id=42 · application/json",
+        arguments: { uri: "demo://items/42" },
+        result: { contents: [{ mimeType: "application/json", text: '{"id":42,"name":"widget"}' }] },
+      },
+    ];
+
+    const kindLabel = { tool: "工具", resource: "资源", prompt: "提示词" };
+    let filter = "all";
+    let query = "";
+
+    function toast(msg) {
+      const el = document.createElement("div");
+      el.textContent = msg;
+      Object.assign(el.style, {
+        position: "fixed",
+        bottom: "24px",
+        right: "24px",
+        background: "#21262d",
+        border: "1px solid #30363d",
+        color: "#e6edf3",
+        padding: "10px 14px",
+        borderRadius: "8px",
+        zIndex: 99,
+        fontSize: "0.875rem",
+        boxShadow: "0 8px 24px rgba(0,0,0,0.45)",
+      });
+      document.body.appendChild(el);
+      setTimeout(() => el.remove(), 1600);
+    }
+
+    function filtered() {
+      return ENTRIES.filter((e) => {
+        if (filter === "error" && e.ok) return false;
+        if (filter !== "all" && filter !== "error" && e.kind !== filter) return false;
+        if (!query) return true;
+        const blob = `${e.name} ${e.summary} ${JSON.stringify(e.arguments)}`.toLowerCase();
+        return blob.includes(query.toLowerCase());
+      });
+    }
+
+    function render() {
+      const list = filtered();
+      const timeline = document.getElementById("timeline");
+      const empty = document.getElementById("empty");
+      document.getElementById("count").textContent =
+        `共 ${list.length} 条 · 服务器 demo-auth`;
+
+      if (!list.length) {
+        timeline.innerHTML = "";
+        empty.hidden = false;
+        return;
+      }
+      empty.hidden = true;
+      timeline.innerHTML = list
+        .map((e) => {
+          const args = JSON.stringify(e.arguments, null, 2);
+          const resultText = e.ok
+            ? JSON.stringify(e.result, null, 2)
+            : e.error || "调用失败";
+          return `
+          <div class="entry ${e.ok ? "ok" : "err"}" data-id="${e.id}">
+            <div class="dot" aria-hidden="true"></div>
+            <div class="card" data-card="${e.id}">
+              <button type="button" class="card-head" data-toggle="${e.id}">
+                <span class="kind ${e.kind}">${kindLabel[e.kind]}</span>
+                <span>
+                  <span class="title-row">
+                    <span class="name">${e.name}</span>
+                    <span class="status ${e.ok ? "ok" : "err"}">${e.ok ? "成功" : "失败"}</span>
+                  </span>
+                  <div class="sub">${e.summary}</div>
+                </span>
+                <span class="stats">
+                  <span class="latency">${e.latency_ms} ms</span>
+                  <span>${e.at}</span>
+                </span>
+              </button>
+              <div class="card-body">
+                <div class="grid-2">
+                  <div>
+                    <p class="block-label">参数</p>
+                    <pre>${escapeHtml(args)}</pre>
+                  </div>
+                  <div>
+                    <p class="block-label">${e.ok ? "结果" : "错误"}</p>
+                    <pre class="${e.ok ? "" : "err"}">${escapeHtml(resultText)}</pre>
+                  </div>
+                </div>
+                <div class="actions">
+                  <button type="button" class="btn primary" data-replay="${e.id}">重放</button>
+                  <button type="button" class="btn" data-save="${e.id}">保存到文档</button>
+                  <button type="button" class="btn" data-copy="${e.id}">复制结果</button>
+                </div>
+              </div>
+            </div>
+          </div>`;
+        })
+        .join("");
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
+    document.getElementById("filters").addEventListener("click", (ev) => {
+      const btn = ev.target.closest(".chip");
+      if (!btn) return;
+      filter = btn.dataset.kind;
+      [...document.querySelectorAll(".chip")].forEach((c) =>
+        c.classList.toggle("active", c === btn)
+      );
+      render();
+    });
+
+    document.getElementById("q").addEventListener("input", (ev) => {
+      query = ev.target.value.trim();
+      render();
+    });
+
+    document.getElementById("timeline").addEventListener("click", (ev) => {
+      const toggle = ev.target.closest("[data-toggle]");
+      if (toggle) {
+        const card = document.querySelector(`[data-card="${toggle.dataset.toggle}"]`);
+        card?.classList.toggle("open");
+        return;
+      }
+      if (ev.target.closest("[data-replay]")) {
+        toast("示意：将用该条参数重新调用");
+        return;
+      }
+      if (ev.target.closest("[data-save]")) {
+        toast("示意：写入文档保存");
+        return;
+      }
+      if (ev.target.closest("[data-copy]")) {
+        toast("示意：已复制结果");
+      }
+    });
+
+    document.getElementById("collapseAll").addEventListener("click", () => {
+      document.querySelectorAll(".card.open").forEach((c) => c.classList.remove("open"));
+    });
+
+    document.getElementById("clearDemo").addEventListener("click", () => {
+      ENTRIES.length = 0;
+      render();
+      toast("示意：已清空历史");
+    });
+
+    render();
+  </script>
+</body>
+</html>

@@ -42,6 +42,7 @@ function PromptBlock({
 
   const handleGet = async () => {
     setLoading(true);
+    const started = performance.now();
     try {
       const args = formValues[prompt.name] || {};
       // Prompt 参数约定为 string→string
@@ -52,6 +53,10 @@ function PromptBlock({
       });
       const res = await getPrompt(serverId, prompt.name, stringArgs);
       const text = res.text || JSON.stringify(res.messages || [], null, 2);
+      const latencyMs =
+        typeof res.latency_ms === 'number'
+          ? res.latency_ms
+          : Math.round(performance.now() - started);
       setLastResults((prev) => ({
         ...prev,
         [prompt.name]: {
@@ -60,13 +65,18 @@ function PromptBlock({
           description: res.description || '',
           arguments: stringArgs,
           error: false,
+          latency_ms: latencyMs,
         },
       }));
       setSaveDisabled(false);
     } catch (err) {
       setLastResults((prev) => ({
         ...prev,
-        [prompt.name]: { text: err.message, error: true },
+        [prompt.name]: {
+          text: err.message,
+          error: true,
+          latency_ms: Math.round(performance.now() - started),
+        },
       }));
       setSaveDisabled(true);
     } finally {
@@ -174,7 +184,12 @@ function PromptBlock({
         {last && (
           <div className={`result-panel ${last.error ? 'error' : ''}`}>
             <div className="result-toolbar">
-              <span className="result-label">消息预览</span>
+              <span className="result-label">
+                消息预览
+                {last.latency_ms != null && (
+                  <span className="result-latency">耗时 {last.latency_ms} ms</span>
+                )}
+              </span>
             </div>
             <pre className="result-box result-area">{last.text}</pre>
           </div>

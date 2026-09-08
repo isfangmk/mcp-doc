@@ -146,3 +146,16 @@ export async function clearPromptSavedData(serverId, name) {
 export async function getDoc(serverId) {
   return fetchJson(API + '/servers/' + serverId + '/doc');
 }
+
+/** 拉取服务器调用历史（新→旧）。 */
+export async function listHistory(serverId, limit = 200) {
+  const q = limit ? `?limit=${encodeURIComponent(limit)}` : '';
+  return fetchJson(API + '/servers/' + serverId + '/history' + q);
+}
+
+/** 清空服务器调用历史。 */
+export async function clearHistory(serverId) {
+  return fetchJson(API + '/servers/' + serverId + '/history', {
+    method: 'DELETE',
+  });
+}

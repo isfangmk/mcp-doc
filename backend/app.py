@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import unquote
@@ -115,6 +116,32 @@ def _serialize_invoke_result(payload: dict[str, Any]) -> str:
         return json.dumps(json.loads(content), ensure_ascii=False, indent=2)
     except (json.JSONDecodeError, TypeError):
         return content
+
+
+def _record_history(
+    server_id: str,
+    kind: str,
+    name: str,
+    arguments: dict[str, Any] | None,
+    result_text: str,
+    is_error: bool,
+    error_message: str = "",
+    latency_ms: int | None = None,
+) -> None:
+    """写入追加式调用历史；失败仅打日志，不影响主流程。"""
+    try:
+        storage.append_call_history(
+            server_id,
+            kind,
+            name,
+            arguments,
+            result_text,
+            is_error,
+            error_message,
+            latency_ms,
+        )
+    except Exception:
+        logger.exception("写入调用历史失败: %s/%s/%s", server_id, kind, name)
 
 
 def _uri_matches_template(uri: str, template: str) -> bool:
@@ -229,20 +256,39 @@ async def api_list_tools(server_id: str):
 async def api_invoke_tool(server_id: str, tool_name: str, body: ToolInvokeBody):
     """调用工具，并记录本次参数与结果供再次打开时回填。"""
     server = _require_server(server_id)
+    started = time.perf_counter()
     try:
         payload = await call_tool_async(server, tool_name, body.arguments)
     except Exception as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        _record_history(
+            server_id,
+            "tool",
+            tool_name,
+            body.arguments,
+            "",
+            True,
+            str(exc),
+            latency_ms,
+        )
         logger.exception("调用工具失败: %s/%s", server_id, tool_name)
         raise HTTPException(status_code=502, detail=f"调用失败: {exc}") from exc
 
-    storage.upsert_last_run(
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    text = _serialize_invoke_result(payload)
+    is_error = bool(payload.get("isError"))
+    storage.upsert_last_run(server_id, tool_name, body.arguments, text, is_error)
+    _record_history(
         server_id,
+        "tool",
         tool_name,
         body.arguments,
-        _serialize_invoke_result(payload),
-        bool(payload.get("isError")),
+        text,
+        is_error,
+        "" if not is_error else text,
+        latency_ms,
     )
-    return payload
+    return {**payload, "latency_ms": latency_ms}
 
 
 @web_app.post("/mcp-doc/api/servers/{server_id}/tools/{tool_name}/save")
@@ -291,11 +337,39 @@ async def api_list_resources(server_id: str):
 async def api_read_resource(server_id: str, body: ResourceReadBody):
     """按 URI 读取资源内容。"""
     server = _require_server(server_id)
+    started = time.perf_counter()
     try:
-        return await read_resource_async(server, body.uri)
+        payload = await read_resource_async(server, body.uri)
     except Exception as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        _record_history(
+            server_id,
+            "resource",
+            body.uri,
+            {"uri": body.uri},
+            "",
+            True,
+            str(exc),
+            latency_ms,
+        )
         logger.exception("读取资源失败: %s %s", server_id, body.uri)
         raise HTTPException(status_code=502, detail=f"读取失败: {exc}") from exc
+
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    text = payload.get("text") or json.dumps(
+        payload.get("contents") or [], ensure_ascii=False, indent=2
+    )
+    _record_history(
+        server_id,
+        "resource",
+        body.uri,
+        {"uri": body.uri},
+        text,
+        False,
+        "",
+        latency_ms,
+    )
+    return {**payload, "latency_ms": latency_ms}
 
 
 @web_app.post("/mcp-doc/api/servers/{server_id}/resources/save")
@@ -348,15 +422,38 @@ async def api_list_prompts(server_id: str):
 async def api_get_prompt(server_id: str, name: str, body: PromptGetBody):
     """按参数生成 Prompt，并记录上次运行。"""
     server = _require_server(server_id)
+    started = time.perf_counter()
     try:
         payload = await get_prompt_async(server, name, body.arguments)
     except Exception as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        _record_history(
+            server_id,
+            "prompt",
+            name,
+            body.arguments,
+            "",
+            True,
+            str(exc),
+            latency_ms,
+        )
         logger.exception("Get Prompt 失败: %s/%s", server_id, name)
         raise HTTPException(status_code=502, detail=f"Get Prompt 失败: {exc}") from exc
 
+    latency_ms = int((time.perf_counter() - started) * 1000)
     text = payload.get("text") or ""
     storage.upsert_prompt_last_run(server_id, name, body.arguments, text, False)
-    return payload
+    _record_history(
+        server_id,
+        "prompt",
+        name,
+        body.arguments,
+        text,
+        False,
+        "",
+        latency_ms,
+    )
+    return {**payload, "latency_ms": latency_ms}
 
 
 @web_app.post("/mcp-doc/api/servers/{server_id}/prompts/{name}/save")
@@ -375,6 +472,27 @@ def api_clear_prompt_saved(server_id: str, name: str):
     _require_server(server_id)
     storage.clear_prompt_saved(server_id, name)
     return {"message": "已清除"}
+
+
+# ---------- History ----------
+
+
+@web_app.get("/mcp-doc/api/servers/{server_id}/history")
+def api_list_history(server_id: str, limit: int = 200):
+    """列出追加式调用历史（新→旧）。"""
+    _require_server(server_id)
+    return {
+        "server_id": server_id,
+        "entries": storage.list_call_history(server_id, limit),
+    }
+
+
+@web_app.delete("/mcp-doc/api/servers/{server_id}/history")
+def api_clear_history(server_id: str):
+    """清空该服务器的全部调用历史。"""
+    _require_server(server_id)
+    deleted = storage.clear_call_history(server_id)
+    return {"message": "已清空历史", "deleted": deleted}
 
 
 @web_app.delete("/mcp-doc/api/servers/{server_id}/saved_data")

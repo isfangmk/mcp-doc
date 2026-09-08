@@ -28,7 +28,9 @@ export function ToolBlock({
   const showMessage = useToast();
   const [result, setResult] = useState(null);
   const [resultError, setResultError] = useState(false);
+  const [latencyMs, setLatencyMs] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [jsonFocused, setJsonFocused] = useState(false);
   const [saveDisabled, setSaveDisabled] = useState(true);
   const jsonRef = useRef(null);
   const params = parseParams(tool);
@@ -62,13 +64,12 @@ export function ToolBlock({
     });
   };
 
-  const handleJsonBlur = () => {
-    const el = jsonRef.current;
-    if (!el) return;
-    try {
-      const raw = JSON.parse(el.value.trim());
-      const args = raw.params?.arguments ?? raw.arguments ?? {};
-      const next = { ...(formValuesByTool[tool.name] ?? {}) };
+  /** 将 JSON 中的 arguments 写入左侧表单，并返回规整后的调用参数。 */
+  const applyArgumentsToForm = (rawArgs) => {
+    const args = rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs) ? rawArgs : {};
+    let coerced = {};
+    setFormValuesByTool((prev) => {
+      const next = { ...(prev[tool.name] ?? {}) };
       params.forEach((p) => {
         if (!(p.name in args)) return;
         const v = args[p.name];
@@ -82,14 +83,42 @@ export function ToolBlock({
           );
         }
       });
-      setFormValuesByTool((prev) => ({ ...prev, [tool.name]: next }));
+      coerced = filterEmptyOptionalParams(next, params);
+      return { ...prev, [tool.name]: next };
+    });
+    return coerced;
+  };
+
+  /** 解析右侧 JSON 并同步到左侧；silent 时解析失败不弹 toast。 */
+  const syncJsonToForm = (silent = false) => {
+    const el = jsonRef.current;
+    if (!el) return null;
+    try {
+      const raw = JSON.parse(el.value.trim() || '{}');
+      const args = raw.params?.arguments ?? raw.arguments ?? {};
+      return applyArgumentsToForm(args);
     } catch (err) {
-      showMessage(`JSON 无效: ${err.message}`, 'error');
+      if (!silent) showMessage(`JSON 无效: ${err.message}`, 'error');
+      return null;
     }
   };
 
+  const handleJsonFocus = () => {
+    setJsonFocused(true);
+  };
+
+  const handleJsonBlur = () => {
+    syncJsonToForm(false);
+    setJsonFocused(false);
+  };
+
+  /** 输入过程中：仅在 JSON 合法时静默同步左侧，避免半截输入打断编辑。 */
+  const handleJsonInput = () => {
+    syncJsonToForm(true);
+  };
+
   useEffect(() => {
-    if (!jsonRef.current || !isActive) return;
+    if (!jsonRef.current || !isActive || jsonFocused) return;
     try {
       const filteredArgs = buildArguments();
       jsonRef.current.value = JSON.stringify(
@@ -100,7 +129,7 @@ export function ToolBlock({
     } catch {
       // 左侧 object/array 文本未构成合法 JSON 时，不覆盖右侧编辑器
     }
-  }, [isActive, tool.name, formValuesByTool, params]);
+  }, [isActive, tool.name, formValuesByTool, params, jsonFocused]);
 
   // 展开工具时回填上次运行结果；折叠时保留内存态即可
   useEffect(() => {
@@ -109,30 +138,43 @@ export function ToolBlock({
     if (!last) {
       setResult(null);
       setResultError(false);
+      setLatencyMs(null);
       setSaveDisabled(true);
       return;
     }
     setResult(serializeInvokeResult(last));
     setResultError(!!last.isError);
+    setLatencyMs(typeof last.latency_ms === 'number' ? last.latency_ms : null);
     setSaveDisabled(!!last.isError);
   }, [isActive, tool.name, lastResultsByTool]);
 
   const handleRun = async () => {
     if (!serverId) return;
+    // 以右侧 JSON 为准同步左侧，再发起调用
+    const synced = syncJsonToForm(false);
+    if (synced == null) return;
     setLoading(true);
     setResult(null);
     setResultError(false);
+    setLatencyMs(null);
+    const started = performance.now();
     try {
-      const args = buildArguments();
+      const args = synced;
       const res = await invokeTool(serverId, tool.name, args);
       setLastResultsByTool((prev) => ({ ...prev, [tool.name]: res }));
       setResult(serializeInvokeResult(res));
       setResultError(!!res.isError);
       setSaveDisabled(!!res.isError);
+      setLatencyMs(
+        typeof res.latency_ms === 'number'
+          ? res.latency_ms
+          : Math.round(performance.now() - started)
+      );
     } catch (err) {
       setResult(err.message);
       setResultError(true);
       setSaveDisabled(true);
+      setLatencyMs(Math.round(performance.now() - started));
     } finally {
       setLoading(false);
     }
@@ -140,11 +182,12 @@ export function ToolBlock({
 
   const handleSave = async () => {
     if (!serverId) return;
+    const synced = syncJsonToForm(true);
     const lastRes = lastResultsByTool[tool.name];
     const text = lastRes ? serializeInvokeResult(lastRes) : '';
     const isError = !!(lastRes && lastRes.isError);
     try {
-      const args = buildArguments();
+      const args = synced ?? buildArguments();
       const res = await saveToolResult(serverId, tool.name, {
         result: text,
         arguments: args,
@@ -177,6 +220,7 @@ export function ToolBlock({
       });
       setResult(null);
       setResultError(false);
+      setLatencyMs(null);
       setSaveDisabled(true);
       showMessage(res.message, 'success');
     } catch (err) {
@@ -260,7 +304,9 @@ export function ToolBlock({
             ref={jsonRef}
             className="json-preview json-preview-editable"
             rows={14}
-            placeholder="编辑 arguments 后失焦同步到左侧"
+            placeholder="编辑 arguments，合法 JSON 会同步到左侧参数"
+            onFocus={handleJsonFocus}
+            onInput={handleJsonInput}
             onBlur={handleJsonBlur}
             defaultValue=""
           />
@@ -279,7 +325,12 @@ export function ToolBlock({
         {result != null && (
           <div className={`result-panel ${resultError ? 'error' : ''}`}>
             <div className="result-toolbar">
-              <span className="result-label">运行结果</span>
+              <span className="result-label">
+                运行结果
+                {latencyMs != null && (
+                  <span className="result-latency">耗时 {latencyMs} ms</span>
+                )}
+              </span>
               <button
                 type="button"
                 className="secondary btn-copy-result"
