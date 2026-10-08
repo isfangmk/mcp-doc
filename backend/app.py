@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import unquote
@@ -19,6 +20,8 @@ from pydantic import BaseModel, Field, model_validator
 from . import storage
 from .client import (
     call_tool_async,
+    close_all_sessions,
+    close_server_session,
     get_prompt_async,
     list_prompts_async,
     list_resources_async,
@@ -31,7 +34,19 @@ logger = logging.getLogger("mcp_doc")
 
 storage.init_db()
 
-web_app = FastAPI(title="MCP Doc", description="连接 MCP 服务，调试 Tools / Resources / Prompts，沉淀文档")
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """应用退出时关闭全部 MCP 复用会话。"""
+    yield
+    await close_all_sessions()
+
+
+web_app = FastAPI(
+    title="MCP Doc",
+    description="连接 MCP 服务，调试 Tools / Resources / Prompts，沉淀文档",
+    lifespan=_lifespan,
+)
 web_app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -197,7 +212,7 @@ def api_add_server(body: ServerBody):
 
 
 @web_app.put("/mcp-doc/api/servers/{server_id}")
-def api_update_server(server_id: str, body: ServerBody):
+async def api_update_server(server_id: str, body: ServerBody):
     """更新 MCP 服务器。"""
     ok = storage.update_server(
         server_id,
@@ -212,14 +227,16 @@ def api_update_server(server_id: str, body: ServerBody):
     )
     if not ok:
         raise HTTPException(status_code=404, detail="服务器不存在")
+    await close_server_session(server_id)
     return {"message": "已更新", "server": storage.get_server(server_id)}
 
 
 @web_app.delete("/mcp-doc/api/servers/{server_id}")
-def api_delete_server(server_id: str):
+async def api_delete_server(server_id: str):
     """删除 MCP 服务器及其调试结果。"""
     if not storage.delete_server(server_id):
         raise HTTPException(status_code=404, detail="服务器不存在")
+    await close_server_session(server_id)
     return {"message": "已删除"}
 
 

@@ -2,15 +2,157 @@
 """MCP 客户端：HTTP / STDIO 双传输，覆盖 Tools / Resources / Prompts。"""
 from __future__ import annotations
 
+import asyncio
 import json
 import time
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 from urllib.parse import unquote
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
+
+# 空闲超过该秒数后，下次取用时重建会话
+_SESSION_IDLE_TTL_SEC = 600
+
+
+def _connection_fingerprint(server: dict[str, Any]) -> str:
+    """连接参数指纹，配置变更时使旧会话失效。"""
+    return json.dumps(
+        {
+            "transport": server.get("transport") or "http",
+            "url": server.get("url") or "",
+            "headers": server.get("headers") or {},
+            "command": server.get("command") or "",
+            "args": server.get("args") or [],
+            "env": server.get("env") or {},
+            "cwd": server.get("cwd") or "",
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+
+
+@dataclass
+class _PooledSession:
+    fingerprint: str
+    session: ClientSession
+    stack: AsyncExitStack
+    last_used: float = field(default_factory=time.monotonic)
+
+
+class McpSessionPool:
+    """按 server.id 复用已 initialize 的 ClientSession。"""
+
+    def __init__(self) -> None:
+        self._slots: dict[str, _PooledSession] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._meta_lock = asyncio.Lock()
+
+    async def _lock_for(self, key: str) -> asyncio.Lock:
+        async with self._meta_lock:
+            lock = self._locks.get(key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._locks[key] = lock
+            return lock
+
+    async def _open_transport(self, server: dict[str, Any], stack: AsyncExitStack) -> ClientSession:
+        transport = server.get("transport") or "http"
+        if transport == "stdio":
+            params = StdioServerParameters(
+                command=server["command"],
+                args=server.get("args") or [],
+                env=server.get("env") or None,
+                cwd=server.get("cwd") or None,
+            )
+            read, write = await stack.enter_async_context(stdio_client(params))
+        else:
+            url = server.get("url") or ""
+            headers = server.get("headers") or {}
+            http_client = await stack.enter_async_context(
+                create_mcp_http_client(headers=headers or None)
+            )
+            streams = await stack.enter_async_context(
+                streamable_http_client(url, http_client=http_client)
+            )
+            read, write = streams[0], streams[1]
+        session = await stack.enter_async_context(ClientSession(read, write))
+        await session.initialize()
+        return session
+
+    async def _create(self, server: dict[str, Any]) -> _PooledSession:
+        stack = AsyncExitStack()
+        await stack.__aenter__()
+        try:
+            session = await self._open_transport(server, stack)
+            return _PooledSession(
+                fingerprint=_connection_fingerprint(server),
+                session=session,
+                stack=stack,
+            )
+        except BaseException:
+            await stack.aclose()
+            raise
+
+    async def _close_slot(self, slot: _PooledSession) -> None:
+        await slot.stack.aclose()
+
+    @asynccontextmanager
+    async def session(self, server: dict[str, Any]) -> AsyncIterator[ClientSession]:
+        key = str(server["id"])
+        fingerprint = _connection_fingerprint(server)
+        lock = await self._lock_for(key)
+        async with lock:
+            slot = self._slots.get(key)
+            stale = (
+                slot is None
+                or slot.fingerprint != fingerprint
+                or (time.monotonic() - slot.last_used) > _SESSION_IDLE_TTL_SEC
+            )
+            if stale:
+                if slot is not None:
+                    self._slots.pop(key, None)
+                    await self._close_slot(slot)
+                slot = await self._create(server)
+                self._slots[key] = slot
+            try:
+                slot.last_used = time.monotonic()
+                yield slot.session
+            except BaseException:
+                current = self._slots.pop(key, None)
+                if current is not None:
+                    await self._close_slot(current)
+                raise
+
+    async def close(self, server_id: str) -> None:
+        key = str(server_id)
+        lock = await self._lock_for(key)
+        async with lock:
+            slot = self._slots.pop(key, None)
+            if slot is not None:
+                await self._close_slot(slot)
+
+    async def close_all(self) -> None:
+        async with self._meta_lock:
+            keys = list(self._slots.keys())
+        for key in keys:
+            await self.close(key)
+
+
+_pool = McpSessionPool()
+
+
+async def close_server_session(server_id: str) -> None:
+    """关闭并丢弃指定服务器的复用会话。"""
+    await _pool.close(server_id)
+
+
+async def close_all_sessions() -> None:
+    """关闭全部复用会话。"""
+    await _pool.close_all()
 
 
 def _pick_non_null_type(values: list[Any]) -> str | None:
@@ -248,30 +390,9 @@ def _get_prompt_payload(result: Any) -> dict[str, Any]:
 
 @asynccontextmanager
 async def open_session(server: dict[str, Any]) -> AsyncIterator[ClientSession]:
-    """按服务器 transport 打开已 initialize 的 ClientSession。"""
-    transport = server.get("transport") or "http"
-    if transport == "stdio":
-        params = StdioServerParameters(
-            command=server["command"],
-            args=server.get("args") or [],
-            env=server.get("env") or None,
-            cwd=server.get("cwd") or None,
-        )
-        async with stdio_client(params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                yield session
-        return
-
-    url = server.get("url") or ""
-    headers = server.get("headers") or {}
-    # headers 经 http_client 传入；streams 兼容 mcp1(三元组) / mcp2(二元组)
-    async with create_mcp_http_client(headers=headers or None) as http_client:
-        async with streamable_http_client(url, http_client=http_client) as streams:
-            read, write = streams[0], streams[1]
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                yield session
+    """取得复用中的 ClientSession（同 server.id 共享连接）。"""
+    async with _pool.session(server) as session:
+        yield session
 
 
 async def probe_connection_async(server: dict[str, Any]) -> dict[str, Any]:
@@ -312,7 +433,7 @@ async def list_resources_async(server: dict[str, Any]) -> dict[str, Any]:
         templates = await session.list_resource_templates()
         return {
             "resources": [_resource_to_dict(r) for r in resources.resources],
-            "templates": [_template_to_dict(t) for t in templates.resourceTemplates],
+            "templates": [_template_to_dict(t) for t in templates.resource_templates],
         }
 
 
