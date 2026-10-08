@@ -10,7 +10,7 @@ from urllib.parse import unquote
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from mcp.client.streamable_http import streamable_http_client
+from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 
 
 def _pick_non_null_type(values: list[Any]) -> str | None:
@@ -96,10 +96,10 @@ def _annotations_to_dict(annotations: Any) -> dict[str, Any]:
     data = annotations.model_dump() if hasattr(annotations, "model_dump") else dict(annotations)
     return {
         "title": data.get("title"),
-        "readOnlyHint": data.get("readOnlyHint"),
-        "destructiveHint": data.get("destructiveHint"),
-        "idempotentHint": data.get("idempotentHint"),
-        "openWorldHint": data.get("openWorldHint"),
+        "readOnlyHint": data.get("read_only_hint"),
+        "destructiveHint": data.get("destructive_hint"),
+        "idempotentHint": data.get("idempotent_hint"),
+        "openWorldHint": data.get("open_world_hint"),
     }
 
 
@@ -119,7 +119,7 @@ def _schema_to_dict(schema: Any) -> dict[str, Any]:
 
 def _tool_to_dict(tool: Any) -> dict[str, Any]:
     """将 MCP Tool 转为 API 响应结构。"""
-    schema = _schema_to_dict(tool.inputSchema)
+    schema = _schema_to_dict(tool.input_schema)
     annotations = _annotations_to_dict(tool.annotations)
     title = ""
     if annotations.get("title"):
@@ -152,13 +152,13 @@ def _content_blocks_to_text(blocks: Any) -> str:
 
 def _result_to_payload(result: Any) -> dict[str, Any]:
     """将 CallToolResult 转为前端使用的结果结构。"""
-    structured = result.structuredContent
+    structured = result.structured_content
     if hasattr(structured, "model_dump"):
         structured = structured.model_dump()
     return {
         "content": _content_blocks_to_text(result.content),
         "structuredContent": structured,
-        "isError": bool(result.isError),
+        "isError": bool(result.is_error),
     }
 
 
@@ -169,18 +169,18 @@ def _resource_to_dict(resource: Any) -> dict[str, Any]:
         "name": resource.name or "",
         "title": getattr(resource, "title", None) or "",
         "description": resource.description or "",
-        "mimeType": resource.mimeType or "",
+        "mimeType": resource.mime_type or "",
     }
 
 
 def _template_to_dict(template: Any) -> dict[str, Any]:
     """将 ResourceTemplate 转为 API 结构。"""
     return {
-        "uriTemplate": str(template.uriTemplate),
+        "uriTemplate": str(template.uri_template),
         "name": template.name or "",
         "title": getattr(template, "title", None) or "",
         "description": template.description or "",
-        "mimeType": template.mimeType or "",
+        "mimeType": template.mime_type or "",
     }
 
 
@@ -208,11 +208,17 @@ def _read_resource_payload(result: Any) -> dict[str, Any]:
     contents: list[dict[str, Any]] = []
     for item in result.contents or []:
         if hasattr(item, "model_dump"):
-            data = item.model_dump()
+            raw = item.model_dump()
+            data = {
+                "uri": str(raw.get("uri", "")),
+                "mimeType": raw.get("mime_type"),
+                "text": raw.get("text"),
+                "blob": raw.get("blob"),
+            }
         else:
             data = {
                 "uri": str(getattr(item, "uri", "")),
-                "mimeType": getattr(item, "mimeType", None),
+                "mimeType": getattr(item, "mime_type", None),
                 "text": getattr(item, "text", None),
                 "blob": getattr(item, "blob", None),
             }
@@ -259,10 +265,13 @@ async def open_session(server: dict[str, Any]) -> AsyncIterator[ClientSession]:
 
     url = server.get("url") or ""
     headers = server.get("headers") or {}
-    async with streamable_http_client(url, headers=headers) as (read, write, _):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            yield session
+    # headers 经 http_client 传入；streams 兼容 mcp1(三元组) / mcp2(二元组)
+    async with create_mcp_http_client(headers=headers or None) as http_client:
+        async with streamable_http_client(url, http_client=http_client) as streams:
+            read, write = streams[0], streams[1]
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                yield session
 
 
 async def probe_connection_async(server: dict[str, Any]) -> dict[str, Any]:

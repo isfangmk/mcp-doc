@@ -12,8 +12,8 @@ WORKDIR /app
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt \
-    -i https://pypi.tuna.tsinghua.edu.cn/simple \
-    --trusted-host pypi.tuna.tsinghua.edu.cn
+    -i https://mirrors.aliyun.com/pypi/simple/ \
+    --trusted-host mirrors.aliyun.com
 
 COPY backend ./backend
 COPY --from=frontend-builder /build/dist ./frontend/dist

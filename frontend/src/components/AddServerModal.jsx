@@ -140,8 +140,8 @@ export function AddServerModal({ open, editingServer, onClose, onSaved }) {
   if (!open) return null;
 
   return (
-    <div className="modal-mask" onClick={onClose}>
-      <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
+    <div className="modal-mask">
+      <div className="modal modal-wide">
         <h3>{isEdit ? '编辑 MCP 服务器' : '新增 MCP 服务器'}</h3>
         <div className="form-group">
           <label>名称</label>
