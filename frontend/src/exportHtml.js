@@ -327,12 +327,30 @@ const DOC_JS = `
     });
   });
 
+  async function copyText(text) {
+    const value = text == null ? '' : String(text);
+    if (window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(value);
+      return;
+    }
+    const ta = document.createElement('textarea');
+    ta.value = value;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;left:-9999px;top:0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (!ok) throw new Error('复制失败');
+  }
+
   document.querySelectorAll('[data-copy]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const id = btn.getAttribute('data-copy');
       const el = document.getElementById(id);
       if (!el) return;
-      await navigator.clipboard.writeText(el.textContent || '');
+      await copyText(el.textContent || '');
       const old = btn.textContent;
       btn.textContent = '已复制';
       setTimeout(() => { btn.textContent = old; }, 1200);

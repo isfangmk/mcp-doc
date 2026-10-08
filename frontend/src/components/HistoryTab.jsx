@@ -9,6 +9,7 @@ import {
   saveResourceResult,
   saveToolResult,
 } from '../api';
+import { copyText } from '../utils';
 import { useToast } from '../ToastContext';
 
 const KIND_LABEL = { tool: '工具', resource: '资源', prompt: '提示词' };
@@ -153,7 +154,7 @@ export function HistoryTab({ serverId, serverName, active }) {
       return;
     }
     try {
-      await navigator.clipboard.writeText(text);
+      await copyText(text);
       showMessage('已复制到剪贴板', 'success');
     } catch (err) {
       showMessage(err.message || '复制失败', 'error');

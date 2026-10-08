@@ -129,6 +129,25 @@ export function filterEmptyOptionalParams(args, params) {
   return filtered;
 }
 
+/** 复制文本到剪贴板（HTTP 非安全上下文用 textarea 选区复制）。 */
+export async function copyText(text) {
+  const value = text == null ? '' : String(text);
+  if (typeof navigator !== 'undefined' && window.isSecureContext && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const ta = document.createElement('textarea');
+  ta.value = value;
+  ta.setAttribute('readonly', '');
+  ta.style.cssText = 'position:fixed;left:-9999px;top:0';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  const ok = document.execCommand('copy');
+  document.body.removeChild(ta);
+  if (!ok) throw new Error('复制失败');
+}
+
 /** 从文档条目解析参数表格行（工具用 inputSchema，提示词用 arguments_schema）。 */
 export function parseDocParams(item) {
   // 提示词的 arguments 可能是数组 schema，优先用 arguments_schema
