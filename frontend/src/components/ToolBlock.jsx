@@ -5,6 +5,7 @@ import {
   serializeInvokeResult,
   filterEmptyOptionalParams,
   defaultValueForParam,
+  copyText,
 } from '../utils';
 import { invokeTool, saveToolResult, clearToolSavedData } from '../api';
 import { useToast } from '../ToastContext';
@@ -67,26 +68,32 @@ export function ToolBlock({
   /** 将 JSON 中的 arguments 写入左侧表单，并返回规整后的调用参数。 */
   const applyArgumentsToForm = (rawArgs) => {
     const args = rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs) ? rawArgs : {};
-    let coerced = {};
-    setFormValuesByTool((prev) => {
-      const next = { ...(prev[tool.name] ?? {}) };
-      params.forEach((p) => {
-        if (!(p.name in args)) return;
-        const v = args[p.name];
-        if (p.type === 'object' || p.type === 'array') {
-          next[p.name] = v;
-        } else {
-          next[p.name] = parseInputValue(
-            v == null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v),
-            p.type,
-            p
-          );
-        }
-      });
-      coerced = filterEmptyOptionalParams(next, params);
-      return { ...prev, [tool.name]: next };
+    const next = { ...(formValuesByTool[tool.name] ?? {}) };
+    params.forEach((p) => {
+      if (!(p.name in args)) return;
+      const v = args[p.name];
+      if (p.type === 'object' || p.type === 'array') {
+        next[p.name] = v;
+      } else {
+        next[p.name] = parseInputValue(
+          v == null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v),
+          p.type,
+          p
+        );
+      }
     });
-    return coerced;
+    setFormValuesByTool((prev) => ({ ...prev, [tool.name]: next }));
+    return filterEmptyOptionalParams(next, params);
+  };
+
+  /** 写入右侧 JSON 预览。 */
+  const writeJsonPreview = (args) => {
+    if (!jsonRef.current) return;
+    jsonRef.current.value = JSON.stringify(
+      { method: 'tools/call', params: { name: tool.name, arguments: args } },
+      null,
+      2
+    );
   };
 
   /** 解析右侧 JSON 并同步到左侧；silent 时解析失败不弹 toast。 */
@@ -120,12 +127,7 @@ export function ToolBlock({
   useEffect(() => {
     if (!jsonRef.current || !isActive || jsonFocused) return;
     try {
-      const filteredArgs = buildArguments();
-      jsonRef.current.value = JSON.stringify(
-        { method: 'tools/call', params: { name: tool.name, arguments: filteredArgs } },
-        null,
-        2
-      );
+      writeJsonPreview(buildArguments());
     } catch {
       // 左侧 object/array 文本未构成合法 JSON 时，不覆盖右侧编辑器
     }
@@ -150,16 +152,26 @@ export function ToolBlock({
 
   const handleRun = async () => {
     if (!serverId) return;
-    // 以右侧 JSON 为准同步左侧，再发起调用
-    const synced = syncJsonToForm(false);
-    if (synced == null) return;
+    let args;
+    try {
+      // 请求参数以左侧表单为准；若正在编辑右侧 JSON，先写入表单
+      if (jsonFocused) {
+        args = syncJsonToForm(false);
+        if (args == null) return;
+      } else {
+        args = buildArguments();
+        writeJsonPreview(args);
+      }
+    } catch (err) {
+      showMessage(`参数无效: ${err.message}`, 'error');
+      return;
+    }
     setLoading(true);
     setResult(null);
     setResultError(false);
     setLatencyMs(null);
     const started = performance.now();
     try {
-      const args = synced;
       const res = await invokeTool(serverId, tool.name, args);
       setLastResultsByTool((prev) => ({ ...prev, [tool.name]: res }));
       setResult(serializeInvokeResult(res));
@@ -182,12 +194,17 @@ export function ToolBlock({
 
   const handleSave = async () => {
     if (!serverId) return;
-    const synced = syncJsonToForm(true);
     const lastRes = lastResultsByTool[tool.name];
     const text = lastRes ? serializeInvokeResult(lastRes) : '';
     const isError = !!(lastRes && lastRes.isError);
     try {
-      const args = synced ?? buildArguments();
+      let args;
+      if (jsonFocused) {
+        args = syncJsonToForm(false);
+        if (args == null) return;
+      } else {
+        args = buildArguments();
+      }
       const res = await saveToolResult(serverId, tool.name, {
         result: text,
         arguments: args,
@@ -232,7 +249,7 @@ export function ToolBlock({
   const handleCopyResult = async () => {
     if (result == null) return;
     try {
-      await navigator.clipboard.writeText(result);
+      await copyText(result);
       showMessage('已复制到剪贴板', 'success');
     } catch (err) {
       showMessage(err.message || '复制失败', 'error');
