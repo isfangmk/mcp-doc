@@ -1,0 +1,26 @@
+[project]
+name = "mcp-doc"
+version = "0.1.0"
+description = "连接 MCP 服务，调试 Tools / Resources / Prompts，沉淀文档"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "mcp>=2.3.0",
+    "httpx>=0.28.0",
+    "pydantic>=2.10.0",
+    "fastmcp>=2.3.0",
+]
+
+# Python 解释器下载走国内镜像（NJU 的 github-release 镜像）
+[tool.uv]
+package = false
+python-install-mirror = "https://mirrors.nju.edu.cn/github-release/astral-sh/python-build-standalone"
+
+# Python 包统一走阿里云 PyPI 源。
+# 设 default = true 以便 Docker 容器内（无全局 uv 配置）也使用该源；
+# 本地若在全局 uv.toml 中配置了其他默认源，以全局为准，可在 pyproject 中改回。
+[[tool.uv.index]]
+name = "aliyun"
+url = "https://mirrors.aliyun.com/pypi/simple/"
+default = true

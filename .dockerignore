@@ -9,4 +9,7 @@ frontend/dist/
 demo_server/
 docs/
 *.md
-!requirements.txt
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
