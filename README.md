@@ -24,14 +24,25 @@
 
 ## 本地开发
 
+依赖管理使用 [uv](https://docs.astral.sh/uv/)（Python 3.12，虚拟环境位于项目根的 `.venv`）。
+
+镜像源约定（均已在 `pyproject.toml` 中配置）：
+
+| 用途 | 源 |
+|------|-----|
+| uv 二进制 / Python 解释器下载 | NJU github-release 镜像 |
+| Python 依赖包 | 阿里云 PyPI（`mirrors.aliyun.com/pypi/simple/`） |
+
 ### 后端
 
 ```bash
-pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-python -m backend.run
+uv sync          # 创建 .venv 并按 uv.lock 安装依赖
+uv run python -m backend.run
 ```
 
 后端默认监听 **8765**，路径前缀 **/mcp-doc**：页面 `/mcp-doc/`，接口 `/mcp-doc/api`。
+
+业务日志（启动、服务器增删改、连接探测、工具/资源/Prompt 调用与保存清理等）输出到控制台，级别由 `MCP_DOC_LOG_LEVEL` 控制，默认 `INFO`；排查 MCP 连接问题可设为 `DEBUG` 查看会话建立/关闭细节。
 
 ### 前端（可选，热更新）
 
@@ -51,6 +62,8 @@ cd frontend && npm run build
 
 ## Docker 部署
 
+镜像内 uv 二进制通过 `pip install` 从阿里云 PyPI 安装，依赖同样走阿里源，无需额外配置。
+
 ```bash
 docker build -t mcp-doc .
 docker run -d \
@@ -64,6 +77,7 @@ docker run -d \
 |------|------|------|
 | `MCP_DOC_PORT` | 服务端口 | `8765` |
 | `MCP_DOC_RELOAD` | 开发热重载 | 关闭 |
+| `MCP_DOC_LOG_LEVEL` | 业务日志级别（`DEBUG`/`INFO`/`WARNING`/`ERROR`） | `INFO` |
 
 访问：`http://<主机>:8765/mcp-doc/`
 
@@ -81,10 +95,10 @@ docker run -d \
 
 ```bash
 # HTTP + Bearer
-python demo_server/server.py
+uv run python demo_server/server.py
 
 # STDIO（无 HTTP 鉴权）
-python demo_server/stdio_main.py
+uv run python demo_server/stdio_main.py
 ```
 
 HTTP 默认 `http://127.0.0.1:8766/mcp`，Header：`Authorization: Bearer demo-token`（可用 `DEMO_MCP_TOKEN` 覆盖）。
@@ -98,3 +112,5 @@ STDIO 服务器配置示例：command=`python`，args=`["demo_server/stdio_main.
 - `demo_server/` — 联调 MCP
 - `docs/screenshots/` — README 界面截图
 - `data/` — SQLite
+- `pyproject.toml` / `uv.lock` — Python 依赖（uv）
+- `.python-version` — Python 版本固定（3.12）

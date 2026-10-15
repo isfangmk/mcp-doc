@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -12,6 +13,8 @@ from typing import Any
 # 数据目录固定在项目根下，便于 Docker 挂载
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DB_PATH = DATA_DIR / "mcp_doc.db"
+
+logger = logging.getLogger("mcp_doc")
 
 
 def _now_iso() -> str:
@@ -132,6 +135,7 @@ def init_db() -> None:
         _ensure_column(conn, "servers", "args_json", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(conn, "servers", "env_json", "TEXT NOT NULL DEFAULT '{}'")
         _ensure_column(conn, "servers", "cwd", "TEXT NOT NULL DEFAULT ''")
+    logger.info("SQLite 就绪: %s", DB_PATH)
 
 
 def _row_to_server(row: sqlite3.Row) -> dict[str, Any]:

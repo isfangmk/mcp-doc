@@ -1,12 +1,18 @@
 # -*- coding: utf-8 -*-
-"""MCP 客户端：HTTP / STDIO 双传输，覆盖 Tools / Resources / Prompts。"""
+"""MCP 客户端：HTTP / STDIO 双传输，覆盖 Tools / Resources / Prompts。
+
+会话不跨请求复用：每次调用新建连接、用完即关。
+原因：MCP 的 streamable_http_client / ClientSession 内部使用 anyio 的任务组与
+cancel scope，要求 enter 与 exit 处于同一个 asyncio Task；而 FastAPI 的每个请求都在
+独立 Task 中处理，复用会话会在关闭时抛
+"Attempted to exit cancel scope in a different task than it was entered in"。
+"""
 from __future__ import annotations
 
-import asyncio
 import json
+import logging
 import time
 from contextlib import AsyncExitStack, asynccontextmanager
-from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 from urllib.parse import unquote
 
@@ -14,51 +20,57 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 
+logger = logging.getLogger("mcp_doc")
+
+
+def _describe(server: dict[str, Any]) -> str:
+    """返回连接方式的简要描述（用于日志，不含 headers / env 等敏感信息）。"""
+    transport = (server.get("transport") or "http").lower()
+    if transport == "stdio":
+        command = (server.get("command") or "").strip()
+        args = " ".join(str(a) for a in (server.get("args") or []))
+        return f"stdio {command} {args}".strip()
+    return f"http {(server.get('url') or '').strip()}"
+
+
+async def _open_transport(server: dict[str, Any], stack: AsyncExitStack) -> ClientSession:
+    """在当前任务内建立 transport + ClientSession 并完成 initialize。"""
+    transport = (server.get("transport") or "http").lower()
+    if transport == "stdio":
+        params = StdioServerParameters(
+            command=server.get("command") or "",
+            args=server.get("args") or [],
+            env=server.get("env") or None,
+            cwd=server.get("cwd") or None,
+        )
+        read, write = await stack.enter_async_context(stdio_client(params))
+    else:
+        url = (server.get("url") or "").rstrip("/")
+        headers = server.get("headers") or {}
+        http_client = await stack.enter_async_context(
+            create_mcp_http_client(headers=headers or None)
+        )
+        # mcp 1.x 产出 (read, write, get_session_id) 三元组，2.x 起为 (read, write) 二元组
+        streams = await stack.enter_async_context(
+            streamable_http_client(url, http_client=http_client)
+        )
+        read, write = streams[0], streams[1]
+    session = await stack.enter_async_context(ClientSession(read, write))
+    await session.initialize()
+    return session
+
+
 @asynccontextmanager
 async def open_session(server: dict[str, Any]) -> AsyncIterator[ClientSession]:
-    """每次请求新建并关闭 MCP 会话，且 enter 与 exit 落在同一个任务中。
-
-    关键约束：MCP 的 streamable_http_client / ClientSession 内部使用 anyio 的任务组与
-    cancel scope，要求「退出它的任务」与「进入它的任务」一致。而每个 HTTP 请求都在
-    uvicorn 的独立任务里处理，复用会话（连接池）时跨任务退出会抛
-    RuntimeError: Attempted to exit cancel scope in a different task than it was entered in。
-    因此这里每次请求都重新建立会话，确保 enter/exit 在同一任务内完成，彻底规避该错误。
-    """
-    transport = (server.get("transport") or "http").lower()
+    """每次请求新建 MCP 会话，enter 与 exit 落在同一个任务中。"""
     stack = AsyncExitStack()
     try:
-        if transport == "stdio":
-            params = StdioServerParameters(
-                command=server.get("command") or "",
-                args=server.get("args") or [],
-                env=server.get("env") or None,
-                cwd=server.get("cwd") or None,
-            )
-            read, write = await stack.enter_async_context(stdio_client(params))
-        else:
-            url = (server.get("url") or "").rstrip("/")
-            headers = server.get("headers") or {}
-            http_client = await stack.enter_async_context(
-                create_mcp_http_client(headers=headers or None)
-            )
-            read, write, _ = await stack.enter_async_context(
-                streamable_http_client(url, http_client=http_client)
-            )
-        session = await stack.enter_async_context(ClientSession(read, write))
-        await session.initialize()
+        session = await _open_transport(server, stack)
+        logger.debug("建立 MCP 会话: %s", _describe(server))
         yield session
     finally:
         await stack.aclose()
-
-
-async def close_server_session(server_id: str) -> None:
-    """关闭指定服务器的会话（当前为每请求新建，无需复用管理，保留接口兼容）。"""
-    return None
-
-
-async def close_all_sessions() -> None:
-    """关闭全部会话（当前为每请求新建，无全局状态，保留接口兼容）。"""
-    return None
+        logger.debug("关闭 MCP 会话: %s", _describe(server))
 
 
 def _pick_non_null_type(values: list[Any]) -> str | None:

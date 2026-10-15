@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import json
-import logging
 import re
 import time
-from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import unquote
@@ -20,8 +18,6 @@ from pydantic import BaseModel, Field, model_validator
 from . import storage
 from .client import (
     call_tool_async,
-    close_all_sessions,
-    close_server_session,
     get_prompt_async,
     list_prompts_async,
     list_resources_async,
@@ -29,24 +25,13 @@ from .client import (
     probe_connection_async,
     read_resource_async,
 )
+from .logging_config import setup_logging
 
-logger = logging.getLogger("mcp_doc")
+logger = setup_logging()
 
 storage.init_db()
 
-
-@asynccontextmanager
-async def _lifespan(_app: FastAPI):
-    """应用退出时关闭全部 MCP 复用会话。"""
-    yield
-    await close_all_sessions()
-
-
-web_app = FastAPI(
-    title="MCP Doc",
-    description="连接 MCP 服务，调试 Tools / Resources / Prompts，沉淀文档",
-    lifespan=_lifespan,
-)
+web_app = FastAPI(title="MCP Doc", description="连接 MCP 服务，调试 Tools / Resources / Prompts，沉淀文档")
 web_app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -208,11 +193,12 @@ def api_add_server(body: ServerBody):
         env=body.env,
         cwd=body.cwd or "",
     )
+    logger.info("新增服务器 %s (%s, id=%s)", server["name"], server["transport"], server["id"])
     return {"message": "新增成功", "server": server}
 
 
 @web_app.put("/mcp-doc/api/servers/{server_id}")
-async def api_update_server(server_id: str, body: ServerBody):
+def api_update_server(server_id: str, body: ServerBody):
     """更新 MCP 服务器。"""
     ok = storage.update_server(
         server_id,
@@ -227,16 +213,18 @@ async def api_update_server(server_id: str, body: ServerBody):
     )
     if not ok:
         raise HTTPException(status_code=404, detail="服务器不存在")
-    await close_server_session(server_id)
+    logger.info("更新服务器 %s (%s, id=%s)", body.name, body.transport, server_id)
     return {"message": "已更新", "server": storage.get_server(server_id)}
 
 
 @web_app.delete("/mcp-doc/api/servers/{server_id}")
-async def api_delete_server(server_id: str):
+def api_delete_server(server_id: str):
     """删除 MCP 服务器及其调试结果。"""
-    if not storage.delete_server(server_id):
+    server = storage.get_server(server_id)
+    if not server:
         raise HTTPException(status_code=404, detail="服务器不存在")
-    await close_server_session(server_id)
+    storage.delete_server(server_id)
+    logger.info("删除服务器 %s (id=%s)", server["name"], server_id)
     return {"message": "已删除"}
 
 
@@ -244,7 +232,17 @@ async def api_delete_server(server_id: str):
 async def api_server_health(server_id: str):
     """探测 MCP 连通性与延迟。"""
     server = _require_server(server_id)
-    return await probe_connection_async(server)
+    result = await probe_connection_async(server)
+    if result.get("ok"):
+        logger.info("连接探测成功 %s: %dms", server["name"], result["latency_ms"])
+    else:
+        logger.warning(
+            "连接探测失败 %s: %dms, %s",
+            server["name"],
+            result["latency_ms"],
+            result["error"],
+        )
+    return result
 
 
 # ---------- Tools ----------
@@ -259,6 +257,7 @@ async def api_list_tools(server_id: str):
     except Exception as exc:
         logger.exception("列出工具失败: %s", server_id)
         raise HTTPException(status_code=502, detail=f"连接 MCP 失败: {exc}") from exc
+    logger.info("拉取工具列表 %s: %d 个", server["name"], len(tools))
     saved_tools, saved_arguments = storage.list_saved_summaries(server_id)
     return {
         "server_id": server_id,
@@ -294,6 +293,10 @@ async def api_invoke_tool(server_id: str, tool_name: str, body: ToolInvokeBody):
     latency_ms = int((time.perf_counter() - started) * 1000)
     text = _serialize_invoke_result(payload)
     is_error = bool(payload.get("isError"))
+    if is_error:
+        logger.warning("工具 %s/%s 返回错误: %dms", server["name"], tool_name, latency_ms)
+    else:
+        logger.info("调用工具 %s/%s: %dms", server["name"], tool_name, latency_ms)
     storage.upsert_last_run(server_id, tool_name, body.arguments, text, is_error)
     _record_history(
         server_id,
@@ -311,18 +314,20 @@ async def api_invoke_tool(server_id: str, tool_name: str, body: ToolInvokeBody):
 @web_app.post("/mcp-doc/api/servers/{server_id}/tools/{tool_name}/save")
 def api_save_result(server_id: str, tool_name: str, body: SaveResultBody):
     """保存工具调试结果（同工具仅保留最新一份）。"""
-    _require_server(server_id)
+    server = _require_server(server_id)
     if body.is_error:
         raise HTTPException(status_code=400, detail="错误结果不能保存")
     storage.save_tool_result(server_id, tool_name, body.arguments, body.result)
+    logger.info("保存工具调试结果 %s/%s", server["name"], tool_name)
     return {"message": "已保存"}
 
 
 @web_app.delete("/mcp-doc/api/servers/{server_id}/tools/{tool_name}/saved_data")
 def api_clear_tool_saved(server_id: str, tool_name: str):
     """清除单个工具的已保存数据。"""
-    _require_server(server_id)
-    storage.clear_tool_saved(server_id, tool_name)
+    server = _require_server(server_id)
+    deleted = storage.clear_tool_saved(server_id, tool_name)
+    logger.info("清除工具已保存数据 %s/%s: %d 条", server["name"], tool_name, deleted)
     return {"message": "已清除"}
 
 
@@ -339,11 +344,19 @@ async def api_list_resources(server_id: str):
         logger.exception("列出资源失败: %s", server_id)
         raise HTTPException(status_code=502, detail=f"连接 MCP 失败: {exc}") from exc
 
-    by_uri = storage.list_resource_saved_arguments(server_id)
+    resources = listed.get("resources") or []
     templates = listed.get("templates") or []
+    logger.info(
+        "拉取资源列表 %s: %d 个资源 / %d 个模板",
+        server["name"],
+        len(resources),
+        len(templates),
+    )
+
+    by_uri = storage.list_resource_saved_arguments(server_id)
     return {
         "server_id": server_id,
-        "resources": listed.get("resources") or [],
+        "resources": resources,
         "templates": templates,
         "saved_uris": storage.list_saved_resource_uris(server_id),
         "saved_arguments": _enrich_resource_saved_arguments(by_uri, templates),
@@ -373,6 +386,7 @@ async def api_read_resource(server_id: str, body: ResourceReadBody):
         raise HTTPException(status_code=502, detail=f"读取失败: {exc}") from exc
 
     latency_ms = int((time.perf_counter() - started) * 1000)
+    logger.info("读取资源 %s %s: %dms", server["name"], body.uri, latency_ms)
     text = payload.get("text") or json.dumps(
         payload.get("contents") or [], ensure_ascii=False, indent=2
     )
@@ -392,7 +406,7 @@ async def api_read_resource(server_id: str, body: ResourceReadBody):
 @web_app.post("/mcp-doc/api/servers/{server_id}/resources/save")
 def api_save_resource(server_id: str, body: ResourceSaveBody):
     """保存资源读取结果。"""
-    _require_server(server_id)
+    server = _require_server(server_id)
     if not (body.result and body.result.strip()):
         raise HTTPException(status_code=400, detail="结果为空，无法保存")
     storage.save_resource_result(
@@ -402,15 +416,17 @@ def api_save_resource(server_id: str, body: ResourceSaveBody):
         body.arguments,
         body.mime_type or "",
     )
+    logger.info("保存资源读取结果 %s %s", server["name"], body.uri)
     return {"message": "已保存"}
 
 
 @web_app.delete("/mcp-doc/api/servers/{server_id}/resources/{uri:path}/saved_data")
 def api_clear_resource_saved(server_id: str, uri: str):
     """清除单个资源 URI 的已保存数据（uri 经 path 编码）。"""
-    _require_server(server_id)
+    server = _require_server(server_id)
     decoded = unquote(uri)
     storage.clear_resource_saved(server_id, decoded)
+    logger.info("清除资源已保存数据 %s %s", server["name"], decoded)
     return {"message": "已清除"}
 
 
@@ -426,6 +442,7 @@ async def api_list_prompts(server_id: str):
     except Exception as exc:
         logger.exception("列出 Prompt 失败: %s", server_id)
         raise HTTPException(status_code=502, detail=f"连接 MCP 失败: {exc}") from exc
+    logger.info("拉取 Prompt 列表 %s: %d 个", server["name"], len(prompts))
     return {
         "server_id": server_id,
         "prompts": prompts,
@@ -458,6 +475,7 @@ async def api_get_prompt(server_id: str, name: str, body: PromptGetBody):
         raise HTTPException(status_code=502, detail=f"Get Prompt 失败: {exc}") from exc
 
     latency_ms = int((time.perf_counter() - started) * 1000)
+    logger.info("生成 Prompt %s/%s: %dms", server["name"], name, latency_ms)
     text = payload.get("text") or ""
     storage.upsert_prompt_last_run(server_id, name, body.arguments, text, False)
     _record_history(
@@ -476,18 +494,20 @@ async def api_get_prompt(server_id: str, name: str, body: PromptGetBody):
 @web_app.post("/mcp-doc/api/servers/{server_id}/prompts/{name}/save")
 def api_save_prompt(server_id: str, name: str, body: PromptSaveBody):
     """保存 Prompt 生成结果。"""
-    _require_server(server_id)
+    server = _require_server(server_id)
     if not (body.result and body.result.strip()):
         raise HTTPException(status_code=400, detail="结果为空，无法保存")
     storage.save_prompt_result(server_id, name, body.result, body.arguments)
+    logger.info("保存 Prompt 生成结果 %s/%s", server["name"], name)
     return {"message": "已保存"}
 
 
 @web_app.delete("/mcp-doc/api/servers/{server_id}/prompts/{name}/saved_data")
 def api_clear_prompt_saved(server_id: str, name: str):
     """清除单个 Prompt 的已保存数据。"""
-    _require_server(server_id)
+    server = _require_server(server_id)
     storage.clear_prompt_saved(server_id, name)
+    logger.info("清除 Prompt 已保存数据 %s/%s", server["name"], name)
     return {"message": "已清除"}
 
 
@@ -497,26 +517,30 @@ def api_clear_prompt_saved(server_id: str, name: str):
 @web_app.get("/mcp-doc/api/servers/{server_id}/history")
 def api_list_history(server_id: str, limit: int = 200):
     """列出追加式调用历史（新→旧）。"""
-    _require_server(server_id)
+    server = _require_server(server_id)
+    entries = storage.list_call_history(server_id, limit)
+    logger.info("拉取调用历史 %s: %d 条", server["name"], len(entries))
     return {
         "server_id": server_id,
-        "entries": storage.list_call_history(server_id, limit),
+        "entries": entries,
     }
 
 
 @web_app.delete("/mcp-doc/api/servers/{server_id}/history")
 def api_clear_history(server_id: str):
     """清空该服务器的全部调用历史。"""
-    _require_server(server_id)
+    server = _require_server(server_id)
     deleted = storage.clear_call_history(server_id)
+    logger.info("清空调用历史 %s: %d 条", server["name"], deleted)
     return {"message": "已清空历史", "deleted": deleted}
 
 
 @web_app.delete("/mcp-doc/api/servers/{server_id}/saved_data")
 def api_clear_server_saved(server_id: str):
     """清除服务器下全部已保存数据（Tools / Resources / Prompts）。"""
-    _require_server(server_id)
-    storage.clear_server_saved(server_id)
+    server = _require_server(server_id)
+    total = storage.clear_server_saved(server_id)
+    logger.info("清除服务器全部已保存数据 %s: %d 条", server["name"], total)
     return {"message": "已清除"}
 
 
@@ -630,6 +654,13 @@ async def api_get_doc(server_id: str):
             }
         )
 
+    logger.info(
+        "生成文档 %s: tools=%d resources=%d prompts=%d",
+        server["name"],
+        len(doc_tools),
+        len(doc_resources),
+        len(doc_prompts),
+    )
     return {
         "server_name": server["name"],
         "tools": doc_tools,
@@ -647,6 +678,7 @@ async def spa_index():
     """托管前端入口页。"""
     index = STATIC_DIR / "index.html"
     if not index.is_file():
+        logger.error("前端未构建: %s 不存在", index)
         raise HTTPException(status_code=503, detail="前端未构建，请先执行 frontend npm run build")
     return FileResponse(index)
 
